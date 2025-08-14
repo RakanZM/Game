@@ -109,7 +109,7 @@ const ASSETS = {
   ASSETS.sfxChop   = synthWavBase64({ durationSec: 0.12, frequency: 320, volume: 0.3,  envelope:'beep' });
   ASSETS.sfxFish   = synthWavBase64({ durationSec: 0.18, frequency: 500, volume: 0.25, envelope:'beep' });
   ASSETS.sfxCook   = synthWavBase64({ durationSec: 0.25, frequency: 900, volume: 0.2,  envelope:'beep' });
-  // simple looping "pad" chord by layering 3 tones into one WAV-like progression (cheap trick: fast arpeggio)
+  // simple looping "pad"
   ASSETS.bgMusic   = synthWavBase64({ durationSec: 2.8, frequency: 440, volume: 0.12, envelope:'pad' });
 })();
 
@@ -137,54 +137,40 @@ let state = {
     woodcutting: { lvl: 1, xp: 0 },
     fishing:     { lvl: 1, xp: 0 },
     cooking:     { lvl: 1, xp: 0 },
-    combat:      { lvl: 1, xp: 0 } // NEW: combat XP/levels
+    combat:      { lvl: 1, xp: 0 } // NEW: combat skill
   },
   enemies: [],
   npcs: [],
   interactables: [],
 };
 
-// Arrow-key input for camera
+// Arrow-key input for camera only (no keyboard movement)
 const camInput = { ArrowUp:false, ArrowDown:false, ArrowLeft:false, ArrowRight:false };
-window.addEventListener('keydown', (e)=> {
-  if (e.key in camInput) camInput[e.key] = true;
-});
-window.addEventListener('keyup', (e)=> {
-  if (e.key in camInput) camInput[e.key] = false;
-});
-
-function isoOrthoSetup(camera) {
-  // ArcRotate with orthographic mode to achieve an "isometric-like" projection
-  camera.mode = BABYLON.Camera.ORTHOGRAPHIC_CAMERA;
-  function updateOrtho() {
-    const rect = engine.getRenderingCanvasClientRect() || { width: canvas.width, height: canvas.height };
-    const aspect = rect.width / rect.height;
-    const orthoSize = 30; // zoom factor
-    camera.orthoLeft   = -orthoSize * aspect;
-    camera.orthoRight  =  orthoSize * aspect;
-    camera.orthoTop    =  orthoSize;
-    camera.orthoBottom = -orthoSize;
-  }
-  updateOrtho();
-  window.addEventListener('resize', updateOrtho);
-}
+window.addEventListener('keydown', (e)=> { if (e.key in camInput) camInput[e.key] = true; });
+window.addEventListener('keyup',   (e)=> { if (e.key in camInput) camInput[e.key] = false; });
 
 function createScene() {
   scene = new BABYLON.Scene(engine);
   scene.clearColor = new BABYLON.Color4(0.04,0.06,0.09,1);
   scene.ambientColor = new BABYLON.Color3(0.6,0.6,0.7);
 
-  // Camera: ArcRotate in ORTHO with RS-like controls
-  cam = new BABYLON.ArcRotateCamera("isoCam", -Math.PI * 0.25, Math.PI * 0.9, 60, new BABYLON.Vector3(0,0,0), scene);
-  cam.panningSensibility = 0;
+  // === CAMERA: RuneScape-like isometric (perspective ArcRotate) ===
+  // Perspective gives depth and proper orbit (orthographic removed).
+  cam = new BABYLON.ArcRotateCamera(
+    "isoCam",
+    -Math.PI * 0.25,  // alpha (45°)
+    1.05,             // beta (tilt ~60° from top)
+    26,               // radius (distance)
+    new BABYLON.Vector3(0, 1, 0), // target will be smoothed to player
+    scene
+  );
+  cam.lowerRadiusLimit = 14;
+  cam.upperRadiusLimit = 40;
+  cam.lowerBetaLimit   = 0.6;
+  cam.upperBetaLimit   = 1.4;
+  cam.panningSensibility = 0; // no panning
+  cam.wheelPrecision = 40;
   cam.attachControl(canvas, true);
-  // Let the user tilt/orbit a bit (instead of locking beta)
-  cam.lowerBetaLimit = 0.6;
-  cam.upperBetaLimit = 1.4;
-  // Keep a consistent isometric zoom (radius fixed in orthographic mode)
-  cam.lowerRadiusLimit = 60;
-  cam.upperRadiusLimit = 60;
-  isoOrthoSetup(cam);
 
   const light = new BABYLON.HemisphericLight("h", new BABYLON.Vector3(0.5,1,0.3), scene);
   light.intensity = 0.95;
@@ -200,7 +186,7 @@ function createScene() {
   audio.fish   = new BABYLON.Sound("fish", ASSETS.sfxFish, scene, null, { volume: 0.7 });
   audio.cook   = new BABYLON.Sound("cook", ASSETS.sfxCook, scene, null, { volume: 0.7 });
 
-  // Materials
+  // === Materials ===
   const matGrass = new BABYLON.StandardMaterial("matGrass", scene);
   matGrass.diffuseTexture = new BABYLON.Texture(ASSETS.texGrass, scene);
   matGrass.specularColor = BABYLON.Color3.Black();
@@ -226,7 +212,7 @@ function createScene() {
   matWood.diffuseTexture = new BABYLON.Texture(ASSETS.texWood, scene);
   matWood.specularColor = BABYLON.Color3.Black();
 
-  // Ground (tiles)
+  // === Ground (tiled so we can ray-pick any tile) ===
   const tileSize = 3;
   const half = 10;
   const groundParent = new BABYLON.TransformNode("groundParent", scene);
@@ -235,8 +221,7 @@ function createScene() {
       const tile = BABYLON.MeshBuilder.CreateGround(`g_${x}_${z}`, { width: tileSize, height: tileSize, subdivisions: 1 }, scene);
       tile.position.set(x * tileSize, 0, z * tileSize);
       tile.checkCollisions = false;
-      // River strip
-      if (z >= -2 && z <= 0) tile.material = matWater;
+      if (z >= -2 && z <= 0) tile.material = matWater; // River strip
       else if ((x+z) % 7 === 0) tile.material = matDirt;
       else tile.material = matGrass;
       tile.parent = groundParent;
@@ -299,7 +284,7 @@ function createScene() {
   player.checkCollisions = true;
   player.ellipsoid = new BABYLON.Vector3(0.45, 1.0, 0.45);
 
-  // Simple selection marker
+  // Selection marker (destination ring)
   navTarget = BABYLON.MeshBuilder.CreateTorus("nav", { diameter: 1.2, thickness: 0.07, tessellation: 32 }, scene);
   navTarget.position.y = 0.05;
   navTarget.isVisible = false;
@@ -346,7 +331,7 @@ function createScene() {
   npc.material = npcMat;
   state.npcs.push({ name: "Lord of Brookhaven", node: npc });
 
-  // Click handling (point & click)
+  // === Click handling (point & click movement / interactions) ===
   scene.onPointerObservable.add((pointerInfo) => {
     if (pointerInfo.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
     const pick = pointerInfo.pickInfo;
@@ -374,23 +359,23 @@ function createScene() {
       return;
     }
 
-    // Move command to ground/any empty pick
+    // Move command to any ground/tile/walkable pick
     moveTo(pick.pickedPoint);
   });
 
-  // tick hook
+  // Tick
   scene.onBeforeRenderObservable.add(update);
   return scene;
 }
 
 /* -----------------------------
-   Movement & Animation (click-to-move with smoothing)
+   Movement & Animation (click-to-move, smoothing)
 -------------------------------- */
 let moveDest = null;
 let velocity = new BABYLON.Vector3(0,0,0);
-const moveSpeed = 5;              // target units/sec
-const accel = 14;                 // acceleration (u/s^2)
-const friction = 10;              // deceleration when no input
+const moveSpeed = 5;     // target units/sec
+const accel = 14;        // acceleration (u/s^2)
+const friction = 10;     // deceleration when no input
 const baseY = 1;
 
 function moveTo(point) {
@@ -405,7 +390,7 @@ function update() {
   const dt = engine.getDeltaTime() / 1000;
   state.time += dt;
 
-  // --- Camera arrow-key control (orbit & tilt) ---
+  // --- Camera orbit/tilt via Arrow keys ---
   if (cam) {
     const rotSpeed = 0.9 * dt;   // radians/sec
     const tiltSpeed = 0.7 * dt;
@@ -414,7 +399,7 @@ function update() {
     if (camInput.ArrowUp)    cam.beta  = Math.max(cam.lowerBetaLimit, cam.beta - tiltSpeed);
     if (camInput.ArrowDown)  cam.beta  = Math.min(cam.upperBetaLimit, cam.beta + tiltSpeed);
 
-    // Always follow the player (centered)
+    // Smooth follow centered on player
     const target = BABYLON.Vector3.Lerp(cam.target, player.position, 0.12);
     cam.setTarget(target);
   }
@@ -429,7 +414,8 @@ function update() {
     } else {
       const dir = toDest.normalize();
       // accelerate toward dir
-      velocity = BABYLON.Vector3.Lerp(velocity, dir.scale(moveSpeed), Math.min(1, accel * dt / moveSpeed));
+      const desired = dir.scale(moveSpeed);
+      velocity = BABYLON.Vector3.Lerp(velocity, desired, Math.min(1, accel * dt / moveSpeed));
       // apply motion
       player.moveWithCollisions(velocity.scale(dt));
       // face direction
@@ -477,7 +463,7 @@ function update() {
     }
   });
 
-  // Floating UI updates
+  // UI updates
   ui.refreshPanels();
 }
 
@@ -540,7 +526,7 @@ const ui = {
       <div>Defense: ${s.defense}</div>
       <div>Gold: ${state.gold}</div>
     `;
-    // Skills (added Combat)
+    // Skills (includes Combat)
     const sk = state.skills;
     this.skillsDiv.innerHTML = `
       <div>Woodcutting: Lv ${sk.woodcutting.lvl} — ${sk.woodcutting.xp} xp</div>
@@ -595,12 +581,12 @@ function grantSkillXp(skillKey, amount) {
     if (skillKey === 'woodcutting') state.stats.strength += 1;
     if (skillKey === 'fishing')     state.stats.defense  += 1;
     if (skillKey === 'cooking')     state.stats.attack   += 1;
-    if (skillKey === 'combat') {    // NEW: combat levels raise core stats gradually
+    if (skillKey === 'combat') {
       const roll = Math.random();
       if (roll < 0.34) state.stats.attack  += 1;
       else if (roll < 0.67) state.stats.strength += 1;
       else state.stats.defense += 1;
-      state.stats.maxHp += 1; // tiny HP increase on combat level-up
+      state.stats.maxHp += 1; // small HP increase
       state.stats.hp = Math.min(state.stats.hp + 2, state.stats.maxHp);
     }
   }
@@ -611,7 +597,7 @@ function grantSkillXp(skillKey, amount) {
 -------------------------------- */
 const combat = {
   damage(attackerStats, defenderStats) {
-    // super simple: base ± random, modified by attack/strength vs defense
+    // base ± random, modified by attack/strength vs defense
     const base = 1 + Math.floor(attackerStats.strength * 0.6 + attackerStats.attack * 0.4);
     const reduction = Math.floor(defenderStats.defense * 0.4);
     const roll = Math.floor(Math.random()*2); // 0–1
@@ -620,13 +606,8 @@ const combat = {
 
   handlePlayerAttack(enemy) {
     if (!enemy.metadata.alive) return;
-    // move into melee range if far
     const dist = BABYLON.Vector3.Distance(player.position, enemy.position);
-    if (dist > 1.7) {
-      moveTo(enemy.position);
-      return;
-    }
-    // swing
+    if (dist > 1.7) { moveTo(enemy.position); return; }
     audio.attack.play();
     const dmg = this.damage(state.stats, enemy.metadata.stats);
     enemy.metadata.hp -= dmg;
@@ -635,7 +616,6 @@ const combat = {
     if (enemy.metadata.hp <= 0) {
       this.killEnemy(enemy);
     } else {
-      // enemy counter chance
       if (Math.random() < 0.4) this.enemyAttackPlayer(enemy);
     }
   },
@@ -645,9 +625,7 @@ const combat = {
     audio.hit.play();
     const dmg = this.damage(enemy.metadata.stats, state.stats);
     state.stats.hp = Math.max(0, state.stats.hp - dmg);
-    if (state.stats.hp <= 0) {
-      this.playerDeath();
-    }
+    if (state.stats.hp <= 0) this.playerDeath();
   },
 
   killEnemy(enemy) {
@@ -657,7 +635,6 @@ const combat = {
     enemy.metadata.respawnTimer = 6 + Math.random()*4;
     // Loot + chance for unique item
     const loot = [...enemy.metadata.loot];
-    // Unique drop system (extremely low rate)
     if (Math.random() < 0.005) {
       loot.push(generateUniqueItem());
     } else if (Math.random() < 0.4) {
@@ -671,7 +648,6 @@ const combat = {
   },
 
   playerDeath() {
-    // respawn near the bridge
     state.stats.hp = state.stats.maxHp;
     player.position.set(0, 1, 2);
   }
@@ -697,28 +673,19 @@ function generateUniqueItem() {
 const skills = {
   woodcut(inter) {
     if (inter.respawn > 0) return; // on cooldown
-    // move close
-    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2) {
-      moveTo(inter.node.position);
-      return;
-    }
+    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2) { moveTo(inter.node.position); return; }
     audio.chop.play();
     grantSkillXp('woodcutting', 10 + ((Math.random()*6)|0));
     addItem({ name:'Log', qty: 1, value: 2 });
     inter.respawn = 3;
-    // small shake
     inter.node.scaling.y = 0.95;
     setTimeout(()=> inter.node.scaling.y = 1, 200);
-    // Cooldown tick
     cooldown(inter);
   },
 
   fish(inter) {
     if (inter.respawn > 0) return;
-    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2.2) {
-      moveTo(inter.node.position);
-      return;
-    }
+    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2.2) { moveTo(inter.node.position); return; }
     audio.fish.play();
     grantSkillXp('fishing', 10 + ((Math.random()*6)|0));
     addItem({ name:'Raw Fish', qty: 1, value: 3 });
@@ -727,13 +694,9 @@ const skills = {
   },
 
   cook(inter) {
-    // require raw fish
     const idx = state.inventory.findIndex(i=>i.name==='Raw Fish' && (i.qty??1)>0);
     if (idx === -1) return;
-    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2.2) {
-      moveTo(inter.node.position);
-      return;
-    }
+    if (BABYLON.Vector3.Distance(player.position, inter.node.position) > 2.2) { moveTo(inter.node.position); return; }
     audio.cook.play();
     grantSkillXp('cooking', 10 + ((Math.random()*6)|0));
     removeItemAt(idx, 1);
