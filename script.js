@@ -119,7 +119,7 @@ const ASSETS = {
 const canvas = document.getElementById('game-canvas');
 const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, antialias: true });
 
-let scene, gui, player, navTarget;
+let scene, gui, player, navTarget, cam;
 let audio = {};
 let state = {
   time: 0,
@@ -136,12 +136,22 @@ let state = {
   skills: {
     woodcutting: { lvl: 1, xp: 0 },
     fishing:     { lvl: 1, xp: 0 },
-    cooking:     { lvl: 1, xp: 0 }
+    cooking:     { lvl: 1, xp: 0 },
+    combat:      { lvl: 1, xp: 0 } // NEW: combat XP/levels
   },
   enemies: [],
   npcs: [],
   interactables: [],
 };
+
+// Arrow-key input for camera
+const camInput = { ArrowUp:false, ArrowDown:false, ArrowLeft:false, ArrowRight:false };
+window.addEventListener('keydown', (e)=> {
+  if (e.key in camInput) camInput[e.key] = true;
+});
+window.addEventListener('keyup', (e)=> {
+  if (e.key in camInput) camInput[e.key] = false;
+});
 
 function isoOrthoSetup(camera) {
   // ArcRotate with orthographic mode to achieve an "isometric-like" projection
@@ -164,13 +174,17 @@ function createScene() {
   scene.clearColor = new BABYLON.Color4(0.04,0.06,0.09,1);
   scene.ambientColor = new BABYLON.Color3(0.6,0.6,0.7);
 
-  const camera = new BABYLON.ArcRotateCamera("isoCam", -Math.PI * 0.25, Math.PI * 0.5, 60, new BABYLON.Vector3(0,0,0), scene);
-  camera.upperBetaLimit = Math.PI * 0.5;
-  camera.lowerBetaLimit = Math.PI * 0.5;
-  camera.upperRadiusLimit = camera.lowerRadiusLimit = 60; // lock zoom
-  camera.panningSensibility = 0;
-  camera.attachControl(canvas, true);
-  isoOrthoSetup(camera);
+  // Camera: ArcRotate in ORTHO with RS-like controls
+  cam = new BABYLON.ArcRotateCamera("isoCam", -Math.PI * 0.25, Math.PI * 0.9, 60, new BABYLON.Vector3(0,0,0), scene);
+  cam.panningSensibility = 0;
+  cam.attachControl(canvas, true);
+  // Let the user tilt/orbit a bit (instead of locking beta)
+  cam.lowerBetaLimit = 0.6;
+  cam.upperBetaLimit = 1.4;
+  // Keep a consistent isometric zoom (radius fixed in orthographic mode)
+  cam.lowerRadiusLimit = 60;
+  cam.upperRadiusLimit = 60;
+  isoOrthoSetup(cam);
 
   const light = new BABYLON.HemisphericLight("h", new BABYLON.Vector3(0.5,1,0.3), scene);
   light.intensity = 0.95;
@@ -364,41 +378,79 @@ function createScene() {
     moveTo(pick.pickedPoint);
   });
 
-  // Simple tick
+  // tick hook
   scene.onBeforeRenderObservable.add(update);
   return scene;
 }
 
 /* -----------------------------
-   Movement & Animation (simplified)
+   Movement & Animation (click-to-move with smoothing)
 -------------------------------- */
 let moveDest = null;
-const moveSpeed = 5; // units/sec
+let velocity = new BABYLON.Vector3(0,0,0);
+const moveSpeed = 5;              // target units/sec
+const accel = 14;                 // acceleration (u/s^2)
+const friction = 10;              // deceleration when no input
+const baseY = 1;
+
 function moveTo(point) {
   if (!point) return;
   moveDest = point.clone();
-  moveDest.y = 1; // keep above ground
+  moveDest.y = baseY; // keep above ground
   navTarget.position.set(moveDest.x, 0.05, moveDest.z);
   navTarget.isVisible = true;
 }
+
 function update() {
   const dt = engine.getDeltaTime() / 1000;
   state.time += dt;
 
-  // Move player
+  // --- Camera arrow-key control (orbit & tilt) ---
+  if (cam) {
+    const rotSpeed = 0.9 * dt;   // radians/sec
+    const tiltSpeed = 0.7 * dt;
+    if (camInput.ArrowLeft)  cam.alpha -= rotSpeed;
+    if (camInput.ArrowRight) cam.alpha += rotSpeed;
+    if (camInput.ArrowUp)    cam.beta  = Math.max(cam.lowerBetaLimit, cam.beta - tiltSpeed);
+    if (camInput.ArrowDown)  cam.beta  = Math.min(cam.upperBetaLimit, cam.beta + tiltSpeed);
+
+    // Always follow the player (centered)
+    const target = BABYLON.Vector3.Lerp(cam.target, player.position, 0.12);
+    cam.setTarget(target);
+  }
+
+  // --- Player movement toward destination with acceleration & bob ---
   if (moveDest) {
-    const dir = moveDest.subtract(player.position);
-    const d = dir.length();
-    if (d < 0.1) { moveDest = null; navTarget.isVisible = false; }
-    else {
-      dir.normalize();
-      player.moveWithCollisions(dir.scale(moveSpeed * dt));
+    const toDest = moveDest.subtract(player.position);
+    const dist = toDest.length();
+    if (dist < 0.12) {
+      moveDest = null;
+      navTarget.isVisible = false;
+    } else {
+      const dir = toDest.normalize();
+      // accelerate toward dir
+      velocity = BABYLON.Vector3.Lerp(velocity, dir.scale(moveSpeed), Math.min(1, accel * dt / moveSpeed));
+      // apply motion
+      player.moveWithCollisions(velocity.scale(dt));
       // face direction
-      player.rotation.y = Math.atan2(dir.x, dir.z);
+      player.rotation.y = Math.atan2(velocity.x, velocity.z);
+      // bob while moving
+      player.position.y = baseY + Math.sin(state.time * 10) * 0.05;
+    }
+  } else {
+    // natural slow down
+    const speed = velocity.length();
+    if (speed > 0.01) {
+      velocity = velocity.scale(Math.max(0, 1 - friction * dt));
+      player.moveWithCollisions(velocity.scale(dt));
+      player.position.y = baseY + Math.sin(state.time * 6) * 0.01; // tiny idle sway
+    } else {
+      velocity.set(0,0,0);
+      player.position.y = baseY;
     }
   }
 
-  // Enemies: basic proximity aggro
+  // --- Enemies: basic proximity aggro & combat ---
   state.enemies.forEach(e => {
     const md = e.metadata;
     if (!md.alive) {
@@ -488,16 +540,17 @@ const ui = {
       <div>Defense: ${s.defense}</div>
       <div>Gold: ${state.gold}</div>
     `;
-    // Skills
+    // Skills (added Combat)
     const sk = state.skills;
     this.skillsDiv.innerHTML = `
       <div>Woodcutting: Lv ${sk.woodcutting.lvl} — ${sk.woodcutting.xp} xp</div>
       <div>Fishing: Lv ${sk.fishing.lvl} — ${sk.fishing.xp} xp</div>
       <div>Cooking: Lv ${sk.cooking.lvl} — ${sk.cooking.xp} xp</div>
+      <div>Combat: Lv ${sk.combat.lvl} — ${sk.combat.xp} xp</div>
     `;
     // Inventory
     this.invList.innerHTML = '';
-    state.inventory.forEach((item, i) => {
+    state.inventory.forEach((item) => {
       const li = document.createElement('li');
       li.innerHTML = `<span>${item.name} x${item.qty || 1}</span><span class="badge">V:${item.value ?? 0}</span>`;
       this.invList.appendChild(li);
@@ -534,18 +587,27 @@ function xpForLevel(lvl) {
 }
 function grantSkillXp(skillKey, amount) {
   const sk = state.skills[skillKey];
+  if (!sk) return;
   sk.xp += amount;
   while (sk.xp >= xpForLevel(sk.lvl + 1)) {
     sk.lvl++;
     // small character bonuses
     if (skillKey === 'woodcutting') state.stats.strength += 1;
-    if (skillKey === 'fishing') state.stats.defense += 1;
-    if (skillKey === 'cooking') state.stats.attack += 1;
+    if (skillKey === 'fishing')     state.stats.defense  += 1;
+    if (skillKey === 'cooking')     state.stats.attack   += 1;
+    if (skillKey === 'combat') {    // NEW: combat levels raise core stats gradually
+      const roll = Math.random();
+      if (roll < 0.34) state.stats.attack  += 1;
+      else if (roll < 0.67) state.stats.strength += 1;
+      else state.stats.defense += 1;
+      state.stats.maxHp += 1; // tiny HP increase on combat level-up
+      state.stats.hp = Math.min(state.stats.hp + 2, state.stats.maxHp);
+    }
   }
 }
 
 /* -----------------------------
-   Combat System
+   Combat System (adds combat XP on hit & kill)
 -------------------------------- */
 const combat = {
   damage(attackerStats, defenderStats) {
@@ -568,6 +630,7 @@ const combat = {
     audio.attack.play();
     const dmg = this.damage(state.stats, enemy.metadata.stats);
     enemy.metadata.hp -= dmg;
+    grantSkillXp('combat', 8);              // XP on successful hit
     ui.updateEnemyHp(enemy);
     if (enemy.metadata.hp <= 0) {
       this.killEnemy(enemy);
@@ -601,11 +664,9 @@ const combat = {
       loot.push({ name: 'Coin', qty: 5 + Math.floor(Math.random()*6), value: 1 });
     }
     loot.forEach(addItem);
-    // tiny heal on kill
-    state.stats.hp = Math.min(state.stats.maxHp, state.stats.hp + 1);
-    // stat xp bump
-    state.stats.attack += Math.random()<0.2 ? 1 : 0;
-    state.stats.strength += Math.random()<0.2 ? 1 : 0;
+    // Kill rewards
+    grantSkillXp('combat', 20);             // extra XP on kill
+    state.stats.hp = Math.min(state.stats.maxHp, state.stats.hp + 2);
     ui.updateEnemyHp(enemy);
   },
 
