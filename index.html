@@ -1,0 +1,40 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Isometric RPG — Riverside Keep (Babylon.js)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <link rel="stylesheet" href="style.css" />
+  <!-- Babylon core + GUI from CDN -->
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+</head>
+<body>
+  <div id="game-root">
+    <canvas id="game-canvas"></canvas>
+    <!-- Minimal HTML overlays (panels are mostly Babylon GUI, but inventory list uses HTML for ease) -->
+    <div id="inventoryPanel" class="panel hidden">
+      <div class="panel-header">Inventory</div>
+      <ul id="inventoryList"></ul>
+    </div>
+    <div id="statsPanel" class="panel hidden">
+      <div class="panel-header">Character</div>
+      <div id="charStats"></div>
+    </div>
+    <div id="skillsPanel" class="panel hidden">
+      <div class="panel-header">Skills</div>
+      <div id="skillsStats"></div>
+    </div>
+    <div id="toolbar">
+      <button id="btnInventory">Inventory (I)</button>
+      <button id="btnStats">Stats (C)</button>
+      <button id="btnSkills">Skills (K)</button>
+      <button id="btnMusic">Music: On/Off (M)</button>
+    </div>
+  </div>
+
+  <!-- Single script containing all game logic + embedded assets -->
+  <script src="script.js"></script>
+</body>
+</html>
