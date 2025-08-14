@@ -113,23 +113,50 @@ window.addEventListener('keydown', (e)=> { if (e.key in camInput) camInput[e.key
 window.addEventListener('keyup',   (e)=> { if (e.key in camInput) camInput[e.key] = false; });
 
 /* -----------------------------
-   3) Model loader helpers
+   3) Patched model loader (rootUrl + sceneFilename split + data-URI support)
 -------------------------------- */
-function isDataUri(u){ return typeof u === 'string' && u.startsWith('data:'); }
 function getModelUri(key){
   const m = (window.MODELS || {});
-  return m[key] || null; // may be a relative path or a data URI
+  return m[key] || null;
 }
 
-async function loadModelAsChild(modelKey, parent, scale=1) {
+async function loadModelAsChild(modelKey, parent, scale = 1) {
   const uri = getModelUri(modelKey);
-  if (!uri) return null;
-  const { meshes, animationGroups } = await BABYLON.SceneLoader.ImportMeshAsync("", "", uri, scene);
-  const root = new BABYLON.TransformNode(`${modelKey}_root`, scene);
-  meshes.forEach(m => { if (m.parent == null) m.parent = root; });
-  root.parent = parent ?? scene;
-  root.scaling.set(scale, scale, scale);
-  return { root, animationGroups };
+  if (!uri) {
+    console.warn(`[Models] No URI for ${modelKey}`);
+    return null;
+  }
+
+  try {
+    // Data URI case (supports base64-embedded later)
+    if (uri.startsWith("data:")) {
+      const { meshes, animationGroups } = await BABYLON.SceneLoader.ImportMeshAsync(
+        "", "", uri, scene
+      );
+      const root = new BABYLON.TransformNode(`${modelKey}_root`, scene);
+      meshes.forEach(m => { if (!m.parent) m.parent = root; });
+      root.parent = parent ?? scene;
+      root.scaling.set(scale, scale, scale);
+      return { root, animationGroups };
+    }
+
+    // File path / URL: split into rootUrl + sceneFilename
+    const lastSlash = uri.lastIndexOf("/");
+    const rootUrl = lastSlash >= 0 ? uri.slice(0, lastSlash + 1) : "";
+    const sceneFilename = lastSlash >= 0 ? uri.slice(lastSlash + 1) : uri;
+
+    const { meshes, animationGroups } = await BABYLON.SceneLoader.ImportMeshAsync(
+      "", rootUrl, sceneFilename, scene
+    );
+    const root = new BABYLON.TransformNode(`${modelKey}_root`, scene);
+    meshes.forEach(m => { if (!m.parent) m.parent = root; });
+    root.parent = parent ?? scene;
+    root.scaling.set(scale, scale, scale);
+    return { root, animationGroups };
+  } catch (err) {
+    console.error(`[Models] Failed to load ${modelKey} from ${uri}`, err);
+    return null;
+  }
 }
 
 /* -----------------------------
@@ -236,7 +263,7 @@ function createScene() {
   playerCol.parent = playerRoot;
   playerRoot.ellipsoid = new BABYLON.Vector3(0.45, 0.9, 0.45);
 
-  // Visual placeholder
+  // Visual placeholder (disposed when GLB loads)
   playerVis = BABYLON.MeshBuilder.CreateBox("playerVis", { size: 1 }, scene);
   playerVis.scaling.set(0.7, 1.8, 0.7);
   playerVis.position.y = 0.9;
@@ -345,51 +372,60 @@ function createScene() {
     moveTo(pick.pickedPoint);
   });
 
-  // Try to swap placeholders with GLBs if provided
+  // Try to swap placeholders with GLBs if provided (using patched loader)
   (async ()=>{
     try {
       const m = window.MODELS || {};
       if (m.PLAYER) {
-        const { root, animationGroups } = await loadModelAsChild('PLAYER', playerRoot, 1.0);
-        playerVis.dispose(); playerVis = root;
-        animIdle = animationGroups?.find(g => /idle/i.test(g.name)) || null;
-        animWalk = animationGroups?.find(g => /walk/i.test(g.name)) || null;
-        animIdle?.start(true, 1.0);
+        const res = await loadModelAsChild('PLAYER', playerRoot, 1.0);
+        if (res) {
+          if (playerVis && playerVis.dispose) playerVis.dispose();
+          playerVis = res.root;
+          animIdle = res.animationGroups?.find(g => /idle/i.test(g.name)) || null;
+          animWalk = res.animationGroups?.find(g => /walk/i.test(g.name)) || null;
+          animIdle?.start(true, 1.0);
+        }
       }
     } catch(e){ console.warn("Player model load failed:", e); }
 
     try {
       const m = window.MODELS || {};
       if (m.NPC) {
-        const { root, animationGroups } = await loadModelAsChild('NPC', npcRoot, 1.0);
-        npcBox.dispose();
-        const idle = animationGroups?.find(g => /idle/i.test(g.name));
-        idle?.start(true, 1.0);
+        const res = await loadModelAsChild('NPC', npcRoot, 1.0);
+        if (res) {
+          npcBox.dispose();
+          const idle = res.animationGroups?.find(g => /idle/i.test(g.name));
+          idle?.start(true, 1.0);
+        }
       }
     } catch(e){ console.warn("NPC model load failed:", e); }
 
     try {
       const m = window.MODELS || {};
       if (m.TREE) {
-        const { root } = await loadModelAsChild('TREE', scene, 1.0);
-        root.setEnabled(false);
-        fallbackTrees.forEach(t => t.dispose());
-        treePositions.forEach(([x,z], i)=>{
-          const inst = root.clone("tree_"+i);
-          inst.position.set(x,0,z);
-          inst.setEnabled(true);
-          const inter = state.interactables.find(n=> n.node && n.node.name === `tree_${x}_${z}`);
-          if (inter) inter.node = inst;
-        });
+        const res = await loadModelAsChild('TREE', scene, 1.0);
+        if (res) {
+          res.root.setEnabled(false);
+          fallbackTrees.forEach(t => t.dispose());
+          treePositions.forEach(([x,z], i)=>{
+            const inst = res.root.clone("tree_"+i);
+            inst.position.set(x,0,z);
+            inst.setEnabled(true);
+            const inter = state.interactables.find(n=> n.node && n.node.name === `tree_${x}_${z}`);
+            if (inter) inter.node = inst;
+          });
+        }
       }
     } catch(e){ console.warn("Tree model load failed:", e); }
 
     try {
       const m = window.MODELS || {};
       if (m.CASTLE) {
-        const { root } = await loadModelAsChild('CASTLE', scene, 1.0);
-        root.position.set(0,0,15);
-        keepBase.dispose(); keepTowerL.dispose(); keepTowerR.dispose();
+        const res = await loadModelAsChild('CASTLE', scene, 1.0);
+        if (res) {
+          res.root.position.set(0,0,15);
+          keepBase.dispose(); keepTowerL.dispose(); keepTowerR.dispose();
+        }
       }
     } catch(e){ console.warn("Castle model load failed:", e); }
   })();
