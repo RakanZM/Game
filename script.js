@@ -87,8 +87,9 @@ const ASSETS = {
 const canvas = document.getElementById('game-canvas');
 const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, antialias: true });
 
-let scene, gui, playerRoot, playerCol, playerVis, navTarget, cam;
+let scene, gui, playerRoot, playerCollider, playerAnchor, playerVis, navTarget, cam;
 let animIdle = null, animWalk = null;
+let hasClips = false; // whether GLB provided usable clips
 let audio = {};
 let state = {
   time: 0,
@@ -128,7 +129,7 @@ async function loadModelAsChild(modelKey, parent, scale = 1) {
   }
 
   try {
-    // Data URI case (supports base64-embedded later)
+    // Data URI case (supports base64-embedded models too)
     if (uri.startsWith("data:")) {
       const { meshes, animationGroups } = await BABYLON.SceneLoader.ImportMeshAsync(
         "", "", uri, scene
@@ -140,7 +141,7 @@ async function loadModelAsChild(modelKey, parent, scale = 1) {
       return { root, animationGroups };
     }
 
-    // File path / URL: split into rootUrl + sceneFilename
+    // File path / URL case
     const lastSlash = uri.lastIndexOf("/");
     const rootUrl = lastSlash >= 0 ? uri.slice(0, lastSlash + 1) : "";
     const sceneFilename = lastSlash >= 0 ? uri.slice(lastSlash + 1) : uri;
@@ -160,7 +161,48 @@ async function loadModelAsChild(modelKey, parent, scale = 1) {
 }
 
 /* -----------------------------
-   4) Scene creation
+   4) Helpers: fit model to ground & clamp
+-------------------------------- */
+function fitModelToGround(rootNode, targetHeight = 1.8) {
+  // 1) Compute world-space bounds of all child meshes
+  const meshes = rootNode.getChildMeshes ? rootNode.getChildMeshes() : [];
+  if (!meshes.length) return;
+
+  let minY = Infinity, maxY = -Infinity;
+  meshes.forEach(m => {
+    m.computeWorldMatrix(true);
+    const bi = m.getBoundingInfo();
+    const min = bi.boundingBox.minimumWorld;
+    const max = bi.boundingBox.maximumWorld;
+    minY = Math.min(minY, min.y);
+    maxY = Math.max(maxY, max.y);
+  });
+
+  // 2) Scale to desired height
+  const currentHeight = Math.max(0.001, maxY - minY);
+  const scale = targetHeight / currentHeight;
+  rootNode.scaling.scaleInPlace(scale);
+
+  // 3) Recompute and lift so feet sit on y=0
+  meshes.forEach(m => m.computeWorldMatrix(true));
+  minY = Infinity; maxY = -Infinity;
+  meshes.forEach(m => {
+    const bb = m.getBoundingInfo().boundingBox;
+    minY = Math.min(minY, bb.minimumWorld.y);
+    maxY = Math.max(maxY, bb.maximumWorld.y);
+  });
+  const lift = -minY; // amount to raise so base sits on Y=0
+  rootNode.position.y += lift;
+}
+
+function clampPlayerY() {
+  // Keep player root at ground-level (no vertical drift)
+  playerRoot.position.y = 0;
+  if (playerAnchor) playerAnchor.position.y = 0; // anchor holds visual
+}
+
+/* -----------------------------
+   5) Scene creation
 -------------------------------- */
 function createScene() {
   scene = new BABYLON.Scene(engine);
@@ -252,24 +294,28 @@ function createScene() {
   const keepTowerR = keepTowerL.clone("towerR");
   keepTowerR.position = new BABYLON.Vector3(5, 4, 18);
 
-  // Player root (collider + visual)
+  // Player root (logic & collider)
   playerRoot = new BABYLON.TransformNode("playerRoot", scene);
   playerRoot.position.set(-2, 0, 2);
 
-  playerCol = BABYLON.MeshBuilder.CreateCapsule("playerCollider", { height: 1.8, radius: 0.45 }, scene);
-  playerCol.checkCollisions = true;
-  playerCol.isPickable = false;
-  playerCol.visibility = 0.0;
-  playerCol.parent = playerRoot;
-  playerRoot.ellipsoid = new BABYLON.Vector3(0.45, 0.9, 0.45);
+  // Visual anchor (we’ll attach GLB under here and keep its feet at y=0)
+  playerAnchor = new BABYLON.TransformNode("playerAnchor", scene);
+  playerAnchor.parent = playerRoot;
+
+  // Invisible collider (for spacing/aggro)
+  playerCollider = BABYLON.MeshBuilder.CreateCapsule("playerCollider", { height: 1.8, radius: 0.45 }, scene);
+  playerCollider.checkCollisions = true;
+  playerCollider.isPickable = false;
+  playerCollider.visibility = 0.0;
+  playerCollider.parent = playerRoot;
 
   // Visual placeholder (disposed when GLB loads)
   playerVis = BABYLON.MeshBuilder.CreateBox("playerVis", { size: 1 }, scene);
   playerVis.scaling.set(0.7, 1.8, 0.7);
-  playerVis.position.y = 0.9;
+  playerVis.position.y = 0.9; // centered
   playerVis.material = new BABYLON.StandardMaterial("pmat", scene);
   playerVis.material.diffuseColor = new BABYLON.Color3(0.85,0.85,1.0);
-  playerVis.parent = playerRoot;
+  playerVis.parent = playerAnchor;
 
   // Selection marker
   navTarget = BABYLON.MeshBuilder.CreateTorus("nav", { diameter: 1.2, thickness: 0.07, tessellation: 32 }, scene);
@@ -377,13 +423,17 @@ function createScene() {
     try {
       const m = window.MODELS || {};
       if (m.PLAYER) {
-        const res = await loadModelAsChild('PLAYER', playerRoot, 1.0);
+        const res = await loadModelAsChild('PLAYER', playerAnchor, 1.0);
         if (res) {
           if (playerVis && playerVis.dispose) playerVis.dispose();
-          playerVis = res.root;
+          // Fit to ground & normalize scale; do this on the node we just created
+          fitModelToGround(res.root, 1.8);
+          // Store animations if any
           animIdle = res.animationGroups?.find(g => /idle/i.test(g.name)) || null;
           animWalk = res.animationGroups?.find(g => /walk/i.test(g.name)) || null;
-          animIdle?.start(true, 1.0);
+          hasClips = !!(animIdle || animWalk);
+          // Start idle if available
+          if (animIdle) animIdle.start(true, 1.0);
         }
       }
     } catch(e){ console.warn("Player model load failed:", e); }
@@ -391,8 +441,13 @@ function createScene() {
     try {
       const m = window.MODELS || {};
       if (m.NPC) {
-        const res = await loadModelAsChild('NPC', npcRoot, 1.0);
+        const res = await loadModelAsChild('NPC', scene, 1.0);
         if (res) {
+          const npcRoot = state.npcs[0]?.node;
+          if (npcRoot) {
+            res.root.parent = npcRoot;
+            fitModelToGround(res.root, 1.8);
+          }
           npcBox.dispose();
           const idle = res.animationGroups?.find(g => /idle/i.test(g.name));
           idle?.start(true, 1.0);
@@ -410,6 +465,7 @@ function createScene() {
           treePositions.forEach(([x,z], i)=>{
             const inst = res.root.clone("tree_"+i);
             inst.position.set(x,0,z);
+            fitModelToGround(inst, 2.2); // trees to a nice size
             inst.setEnabled(true);
             const inter = state.interactables.find(n=> n.node && n.node.name === `tree_${x}_${z}`);
             if (inter) inter.node = inst;
@@ -424,6 +480,7 @@ function createScene() {
         const res = await loadModelAsChild('CASTLE', scene, 1.0);
         if (res) {
           res.root.position.set(0,0,15);
+          fitModelToGround(res.root, 6.0);
           keepBase.dispose(); keepTowerL.dispose(); keepTowerR.dispose();
         }
       }
@@ -435,7 +492,7 @@ function createScene() {
 }
 
 /* -----------------------------
-   5) Movement & Animation (click-to-move with smoothing)
+   6) Movement & Animation (click-to-move with smoothing; no vertical bob)
 -------------------------------- */
 let moveDest = null;
 let velocity = new BABYLON.Vector3(0,0,0);
@@ -451,12 +508,22 @@ function moveTo(point) {
 }
 
 function setAnimState(moving) {
-  if (animIdle || animWalk) {
+  if (hasClips) {
     if (moving) { if (animWalk && !animWalk.isPlaying) { animIdle?.stop(); animWalk.start(true, 1.0); } }
     else        { if (animIdle && !animIdle.isPlaying) { animWalk?.stop(); animIdle.start(true, 1.0); } }
-  } else {
-    // fallback bob
-    playerVis.position.y = moving ? (0.1 * Math.sin(state.time*10) + 0.9) : 0.9;
+    return;
+  }
+  // Procedural fallback (no vertical movement; keep feet planted)
+  if (playerAnchor) {
+    // tiny torso sway at idle; subtle gait when moving (rotate around X/Z a bit)
+    const t = state.time;
+    if (moving) {
+      playerAnchor.rotation.x = 0.05 * Math.sin(t * 8.0);
+      playerAnchor.rotation.z = 0.03 * Math.sin(t * 12.0);
+    } else {
+      playerAnchor.rotation.x = 0.01 * Math.sin(t * 2.0);
+      playerAnchor.rotation.z = 0.0;
+    }
   }
 }
 
@@ -475,7 +542,7 @@ function update() {
     cam.setTarget(target);
   }
 
-  // Player movement toward destination with acceleration & facing
+  // Player movement toward destination with acceleration & facing (keep at Y=0)
   let isMoving = false;
   if (moveDest) {
     const toDest = moveDest.subtract(playerRoot.position); toDest.y = 0;
@@ -497,6 +564,7 @@ function update() {
       isMoving = velocity.length() > 0.05;
     } else velocity.set(0,0,0);
   }
+  clampPlayerY();
   setAnimState(isMoving);
 
   // Enemies: basic proximity aggro & combat
@@ -525,7 +593,7 @@ function update() {
 }
 
 /* -----------------------------
-   6) UI (Babylon GUI + DOM)
+   7) UI (Babylon GUI + DOM)
 -------------------------------- */
 const ui = {
   invList: document.getElementById('inventoryList'),
@@ -617,7 +685,7 @@ const ui = {
 })();
 
 /* -----------------------------
-   7) Leveling helpers
+   8) Leveling helpers
 -------------------------------- */
 function xpForLevel(lvl) { return Math.floor(50 * Math.pow(lvl - 1, 1.6) + 0); }
 function grantSkillXp(skillKey, amount) {
@@ -640,7 +708,7 @@ function grantSkillXp(skillKey, amount) {
 }
 
 /* -----------------------------
-   8) Combat System
+   9) Combat System
 -------------------------------- */
 const combat = {
   damage(attackerStats, defenderStats) {
@@ -692,7 +760,7 @@ const combat = {
 };
 
 /* -----------------------------
-   9) Unique Item Generation
+   10) Unique Item Generation
 -------------------------------- */
 function generateUniqueItem() {
   const prefixes = ['Elder', 'Starlit', 'Warden’s', 'Whispering', 'Brookhaven'];
@@ -706,7 +774,7 @@ function generateUniqueItem() {
 }
 
 /* -----------------------------
-   10) Skills
+   11) Skills
 -------------------------------- */
 const skills = {
   woodcut(inter) {
@@ -746,7 +814,7 @@ function cooldown(inter) {
 }
 
 /* -----------------------------
-   11) Inventory helpers
+   12) Inventory helpers
 -------------------------------- */
 function addItem(it) {
   const existing = state.inventory.find(x=>x.name===it.name && !x.unique);
@@ -760,7 +828,7 @@ function removeItemAt(idx, qty=1) {
 }
 
 /* -----------------------------
-   12) Music toggle
+   13) Music toggle
 -------------------------------- */
 function toggleMusic() {
   state.musicOn = !state.musicOn;
@@ -769,7 +837,7 @@ function toggleMusic() {
 }
 
 /* -----------------------------
-   13) Boot
+   14) Boot
 -------------------------------- */
 createScene();
 engine.runRenderLoop(()=> scene.render());
